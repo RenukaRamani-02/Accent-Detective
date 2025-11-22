@@ -1,0 +1,7 @@
+streamlit
+torch
+torchaudio
+scikit-learn
+pandas
+numpy
+soundfile
