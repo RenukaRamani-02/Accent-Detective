@@ -1,7 +1,9 @@
 streamlit
+numpy
+pandas
+scikit-learn
+joblib
+librosa
+soundfile
 torch
 torchaudio
-scikit-learn
-pandas
-numpy
-soundfile
