@@ -6,3 +6,5 @@ soundfile
 torch
 transformers==4.36.2
 joblib
+streamlit-lottie
+
