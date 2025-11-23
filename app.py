@@ -1,218 +1,137 @@
-# app.py — Accent Detective (HuBERT) — upload + browser-record + styled UI
+# Accent Detective — Final Streamlit Cloud Version (With CSV Logging)
 import streamlit as st
 import numpy as np
 import librosa
-import torch
 import joblib
-import tempfile, base64, os, requests
-from transformers import HubertModel, Wav2Vec2FeatureExtractor
-from streamlit_lottie import st_lottie
-from PIL import Image
+import pickle
+import soundfile as sf
+import tempfile, os, time, csv
 
-# ---------------- page config ----------------
+# ---------------- Streamlit Setup ----------------
 st.set_page_config(page_title="Accent Detective", page_icon="🎧", layout="wide")
 
-ASSETS_DIR = "assets"
-LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
-BG_PATH = os.path.join(ASSETS_DIR, "background.jpg")
+st.title("🎙️ Accent Detective — Indian Accent & Age Prediction")
+st.write("Upload or record audio. Every prediction is saved in **predictions_log.csv**.")
 
-# ---------------- helpers ----------------
-def get_base64_of_bin_file(bin_file):
-    with open(bin_file, "rb") as f:
-        data = f.read()
-    return base64.b64encode(data).decode()
+# ---------------- Logging ----------------
+LOG_CSV = "predictions_log.csv"
 
-def set_background_local(image_path, opacity=0.45):
-    if not os.path.exists(image_path):
-        return
-    bin_str = get_base64_of_bin_file(image_path)
-    css = f"""
-    <style>
-    .stApp {{
-      background-image: url("data:image/jpg;base64,{bin_str}");
-      background-size: cover;
-      background-position: center;
-      background-attachment: fixed;
-    }}
-    .bg-overlay {{
-      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-      background: rgba(255,255,255,{opacity}); z-index: -1;
-    }}
-    .card {{ background: rgba(255,255,255,0.88); border-radius: 12px; padding: 18px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); }}
-    </style>
-    <div class="bg-overlay"></div>
-    """
-    st.markdown(css, unsafe_allow_html=True)
+def log_prediction(input_name, label, confidence, age_group):
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    header = ["timestamp", "input_file", "predicted_label", "confidence", "age_group"]
+    exists = os.path.exists(LOG_CSV)
+    with open(LOG_CSV, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if not exists:
+            w.writerow(header)
+        w.writerow([now, input_name, label, confidence, age_group])
 
-def load_lottie_url(url):
-    try:
-        r = requests.get(url, timeout=8)
-        if r.status_code == 200:
-            return r.json()
-    except:
-        return None
-
-# ---------------- header ----------------
-set_background_local(BG_PATH, opacity=0.48)
-
-col1, col2 = st.columns([1, 4])
-with col1:
-    if os.path.exists(LOGO_PATH):
-        logo = Image.open(LOGO_PATH)
-        st.image(logo, width=220)
-with col2:
-    st.markdown("<h1 style='color:#0f1b4c;'>🎙️ Accent Detective</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='color:#333;margin-top:-10px;'>Detect accent (HuBERT), estimate age group & recommend cuisines</p>", unsafe_allow_html=True)
-
-st.markdown("---")
-
-# ---------------- load models (cached) ----------------
+# ---------------- Load Model + Encoder Safely ----------------
 @st.cache_resource
 def load_models():
-    # try several possible filenames (user may have named encoder/model differently)
-    model_names = [
-        "AccentDetective_HuBERT_model.pkl",
-        "AccentDetective_HuBERT_model.pkl",
-        "AccentDetective_model_balanced_rf.pkl",  # fallback
-        "AccentDetective_model.pkl",
-    ]
-    encoder_names = [
-        "AccentDetective_HuBERT_label_encoder.pkl",
-        "AccentDetective_HuBERT_encoder.pkl",
-        "AccentDetective_label_encoder_balanced.pkl",
-        "AccentDetective_label_encoder.pkl",
-        "AccentDetective_HuBERT_label_encoder.pkl"
-    ]
-    clf = None
-    le = None
-    # locate model
-    for m in model_names:
-        if os.path.exists(m):
-            clf = joblib.load(m)
-            break
-    if clf is None:
-        raise FileNotFoundError(f"No classifier .pkl found. Checked: {model_names}")
+    clf_path = "AccentDetective_HuBERT_model.pkl"
+    enc_path = "AccentDetective_HuBERT_encoder.pkl"
 
-    for e in encoder_names:
-        if os.path.exists(e):
-            le = joblib.load(e)
-            break
-    if le is None:
-        raise FileNotFoundError(f"No label-encoder .pkl found. Checked: {encoder_names}")
+    # Try joblib → pickle fallback
+    try:
+        clf = joblib.load(clf_path)
+    except:
+        with open(clf_path, "rb") as f:
+            clf = pickle.load(f)
 
-    # load feature-extractor + huBERT
-    processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
-    hubert = HubertModel.from_pretrained("facebook/hubert-base-ls960")
-    hubert.eval()
-    # cuisine mapping
-    cuisine_map = {
-        "andhra_pradesh": ["Pulihora", "Gongura Pachadi", "Pesarattu"],
-        "karnataka": ["Bisi Bele Bath", "Ragi Mudde", "Mysore Pak"],
-        "kerala": ["Appam", "Avial", "Puttu"],
-        "tamil": ["Idli", "Sambar", "Pongal"]
-    }
-    return clf, le, processor, hubert, cuisine_map
+    try:
+        enc = joblib.load(enc_path)
+    except:
+        with open(enc_path, "rb") as f:
+            enc = pickle.load(f)
+
+    return clf, enc
 
 try:
-    clf, le, processor, hubert, cuisine_map = load_models()
+    clf, enc = load_models()
 except Exception as e:
-    st.error("Error loading model files: " + str(e))
+    st.error("❌ Could not load model/encoder files.\n" + str(e))
     st.stop()
 
-# ---------------- sidebar Lottie ----------------
-with st.sidebar:
-    lottie_url = "https://assets7.lottiefiles.com/packages/lf20_jcikwtux.json"
-    lottie_json = load_lottie_url(lottie_url)
-    if lottie_json:
-        st_lottie(lottie_json, height=260, key="accent-lottie")
-    st.write("How to use:")
-    st.write("- Record (browser) or upload a short English sentence (2–8s).")
-    st.write("- Quiet room, speak clearly for best results.")
+# ---------------- Audio Feature Extraction (MFCC) ----------------
+def load_audio(path, sr=16000):
+    try:
+        y, sr_read = sf.read(path, dtype="float32")
+        if y.ndim > 1:
+            y = y.mean(axis=1)
+        if sr_read != sr:
+            y = librosa.resample(y, orig_sr=sr_read, target_sr=sr)
+        return y
+    except:
+        y, _ = librosa.load(path, sr=sr)
+        return y
 
-# ---------------- main UI ----------------
-st.markdown("<div class='card'>", unsafe_allow_html=True)
-left, right = st.columns([1, 1.2])
+def extract_features(path):
+    y = load_audio(path)
+    y = librosa.util.fix_length(y, size=16000 * 3)
+    mfcc = librosa.feature.mfcc(y=y, sr=16000, n_mfcc=40)
+    return np.mean(mfcc, axis=1).reshape(1, -1)
 
-with left:
-    st.subheader("Input")
-    input_mode = st.radio("Choose input:", ("🎤 Record (browser)", "📁 Upload file"))
-    temp_path = None
+# ---------------- UI — Input Section ----------------
+st.subheader("🎧 Choose Input")
 
-    if input_mode == "📁 Upload file":
-        uploaded = st.file_uploader("Upload audio (.wav/.mp3/.m4a/.ogg)", type=["wav","mp3","m4a","ogg"])
-        if uploaded is not None:
-            tf = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded.name)[1])
-            tf.write(uploaded.read())
-            tf.flush(); tf.close()
+input_mode = st.radio("Select method:", ["📁 Upload Audio", "🎤 Record (browser)"])
+
+temp_path = None
+
+# Try browser recorder
+recorder_available = False
+try:
+    from streamlit_audiorecorder import audiorecorder
+    recorder_available = True
+except:
+    recorder_available = False
+
+if input_mode == "📁 Upload Audio":
+    uploaded = st.file_uploader("Upload audio file (wav/mp3/m4a/ogg)", type=["wav", "mp3", "m4a", "ogg"])
+    if uploaded:
+        tf = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        tf.write(uploaded.read())
+        tf.close()
+        temp_path = tf.name
+        st.audio(temp_path)
+
+else:
+    if recorder_available:
+        st.write("Click record:")
+        audio_bytes = audiorecorder("Start Recording", "Stop")
+        if audio_bytes:
+            tf = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+            tf.write(audio_bytes)
+            tf.close()
             temp_path = tf.name
             st.audio(temp_path)
-
     else:
-        # try to use st.audio_input (available on recent Streamlit deployments)
-        try:
-            audio_bytes = st.audio_input("Record using your browser (click to start)")
-            if audio_bytes is not None:
-                tf = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-                tf.write(audio_bytes.read())
-                tf.flush(); tf.close()
-                temp_path = tf.name
-                st.audio(temp_path)
-        except Exception:
-            st.info("Browser recording not available here — please upload a file instead.")
+        st.warning("Browser recorder unavailable. Install: pip install streamlit-audiorecorder")
+        st.info("Use Upload Audio instead.")
 
-with right:
-    st.subheader("Controls & Output")
-    if st.button("🔍 Detect Accent & Age"):
-        if not temp_path:
-            st.error("Please record or upload audio first.")
-        else:
-            with st.spinner("Analyzing..."):
-                audio, sr = librosa.load(temp_path, sr=16000)
-                inputs = processor(audio, sampling_rate=16000, return_tensors="pt", padding=True)
-                with torch.no_grad():
-                    outputs = hubert(**inputs)
-                emb = outputs.last_hidden_state.mean(dim=1).squeeze().cpu().numpy().reshape(1, -1)
+# ---------------- Predict Button ----------------
+st.subheader("🔍 Run Accent & Age Detection")
 
-                # predict accent
-                try:
-                    probs = clf.predict_proba(emb)[0]
-                    idx = int(np.argmax(probs))
-                    pred_label = le.inverse_transform([idx])[0]
-                    confidence = float(probs.max() * 100)
-                except Exception:
-                    # if classifier does not have predict_proba
-                    pred_label = le.inverse_transform(clf.predict(emb))[0]
-                    confidence = None
+if st.button("Detect Accent"):
+    if not temp_path:
+        st.error("Please upload or record audio first.")
+    else:
+        with st.spinner("Analyzing..."):
 
-                # simple age heuristic (placeholder)
-                energy = float(np.mean(np.abs(audio)))
-                duration = len(audio) / sr
-                age_score = int(18 + (np.clip(energy*30, 0, 1) + np.clip(duration/5, 0,1)) * 22)
-                if age_score < 25:
-                    age_group = "Young"
-                elif age_score < 40:
-                    age_group = "Adult"
-                else:
-                    age_group = "Senior"
+            features = extract_features(temp_path)
 
-                cuisines = cuisine_map.get(pred_label, ["Regional favorites"])
-
-            st.markdown(f"### 🎯 Detected Accent: **{pred_label.title()}**")
-            if confidence is not None:
-                st.markdown(f"**Confidence:** {confidence:.2f}%")
-            else:
-                st.markdown("**Confidence:** N/A")
-            st.markdown(f"**Predicted Age Group:** {age_group} ({age_score} yrs approx.)")
-            st.markdown("**Recommended Cuisines:**")
-            for d in cuisines:
-                st.write("- " + d)
-
-            # cleanup temp file
+            # Try encoder.transform (if exists)
             try:
-                os.remove(temp_path)
+                X = enc.transform(features)
             except:
-                pass
+                X = features
 
-st.markdown("</div>", unsafe_allow_html=True)
-st.markdown("<div style='text-align:center; color:#333; margin-top:18px'>Built with ❤️ — Accent Detective</div>", unsafe_allow_html=True)
+            # Predict accent
+            try:
+                if hasattr(clf, "predict_proba"):
+                    probs = clf.predict_proba(X)[0]
+                    idx = np.argmax(probs)
+                    predicted_label = enc.inverse_transform([idx])[0]
+                    confidence = round(float(pr
 
