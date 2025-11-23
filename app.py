@@ -1,6 +1,7 @@
 # Accent Detective — Final Streamlit Cloud Version (With CSV Logging)
 import streamlit as st
 import numpy as np
+import pandas as pd
 import librosa
 import joblib
 import pickle
@@ -32,13 +33,14 @@ def load_models():
     clf_path = "AccentDetective_HuBERT_model.pkl"
     enc_path = "AccentDetective_HuBERT_encoder.pkl"
 
-    # Try joblib → pickle fallback
+    # Load classifier
     try:
         clf = joblib.load(clf_path)
     except:
         with open(clf_path, "rb") as f:
             clf = pickle.load(f)
 
+    # Load label encoder
     try:
         enc = joblib.load(enc_path)
     except:
@@ -79,7 +81,7 @@ input_mode = st.radio("Select method:", ["📁 Upload Audio", "🎤 Record (brow
 
 temp_path = None
 
-# Try browser recorder
+# Browser recorder support
 recorder_available = False
 try:
     from streamlit_audiorecorder import audiorecorder
@@ -121,7 +123,7 @@ if st.button("Detect Accent"):
 
             features = extract_features(temp_path)
 
-            # Try encoder.transform (if exists)
+            # Transform using encoder
             try:
                 X = enc.transform(features)
             except:
@@ -133,5 +135,40 @@ if st.button("Detect Accent"):
                     probs = clf.predict_proba(X)[0]
                     idx = np.argmax(probs)
                     predicted_label = enc.inverse_transform([idx])[0]
-                    confidence = round(float(pr
+                    confidence = round(float(probs[idx] * 100), 2)
+                else:
+                    predicted_label = clf.predict(X)[0]
+                    confidence = None
+            except Exception as e:
+                st.error("Model prediction error: " + str(e))
+                st.stop()
 
+            # Age estimate (simple)
+            y = load_audio(temp_path)
+            energy = float(np.mean(np.abs(y)))
+            if energy < 0.1:
+                age_group = "Senior"
+            elif energy < 0.3:
+                age_group = "Adult"
+            else:
+                age_group = "Young"
+
+        # Display results
+        st.success(f"🎯 **Accent:** {predicted_label}")
+        if confidence is not None:
+            st.info(f"Confidence: **{confidence}%**")
+        st.write(f"**Estimated Age Group:** {age_group}")
+
+        # Save to CSV
+        log_prediction(os.path.basename(temp_path), predicted_label, confidence, age_group)
+        st.success("📁 Saved to predictions_log.csv")
+
+# ---------------- Show Last Logs ----------------
+st.subheader("📄 Recent Predictions Log")
+
+if os.path.exists(LOG_CSV):
+    df = pd.read_csv(LOG_CSV)
+    st.dataframe(df.tail(10))
+
+# Footer
+st.caption("Built by Renuka Renu — Accent Detective Project 🎧")
