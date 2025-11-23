@@ -1,9 +1,8 @@
 streamlit
 numpy
 pandas
-scikit-learn
-joblib
 librosa
 soundfile
 torch
-torchaudio
+transformers==4.36.2
+joblib
